@@ -22,10 +22,17 @@ import requests
 
 
 DEFAULT_BASE_SITE = "https://seanprashad.com/leetcode-patterns/"
+FALLBACK_PATTERNS_URL = (
+    "https://raw.githubusercontent.com/SeanPrashad/leetcode-patterns/master/src/data/leetcode-patterns.json"
+)
 
 
 def scrape_patterns(
-    base_url: str | None = None, *, session: requests.Session | None = None
+    base_url: str | None = None,
+    *,
+    session: requests.Session | None = None,
+    allow_fallback: bool = True,
+    fallback_url: str | None = None,
 ) -> List[Dict[str, Any]]:
     """Fetch and normalize patterns from the target site."""
     base_url = base_url or load_base_site()
@@ -37,6 +44,9 @@ def scrape_patterns(
 
     if not patterns:
         patterns = extract_patterns_from_html(html)
+
+    if not patterns and allow_fallback:
+        patterns = fetch_fallback_patterns(sess, fallback_url=fallback_url)
 
     normalized = [normalize_pattern(entry, base_url) for entry in patterns]
     return [p for p in normalized if p["pattern"] and p["problems"]]
@@ -84,22 +94,37 @@ def extract_patterns_from_next_data(next_data: Any) -> List[Mapping[str, Any]]:
     """Search recursively for a list of pattern objects in Next.js data."""
     patterns: List[Mapping[str, Any]] = []
 
+    def looks_like_pattern_list(node: Any) -> bool:
+        return bool(
+            isinstance(node, list)
+            and node
+            and all(
+                isinstance(item, dict)
+                and any(k in item for k in ("pattern", "name", "title"))
+                and ("problems" in item or "questions" in item)
+                for item in node
+            )
+        )
+
     def walk(node: Any):
         nonlocal patterns
         if patterns:
             return
+        if looks_like_pattern_list(node):
+            patterns = node  # type: ignore[assignment]
+            return
         if isinstance(node, list):
-            if node and all(isinstance(item, dict) and "problems" in item for item in node):
-                patterns = node  # type: ignore[assignment]
-                return
             for item in node:
                 walk(item)
         elif isinstance(node, dict):
-            if "patterns" in node and isinstance(node["patterns"], list):
-                candidate = node["patterns"]
-                if candidate:
-                    patterns[:] = candidate  # type: ignore[index]
-                    return
+            if "patterns" in node and looks_like_pattern_list(node["patterns"]):
+                patterns = node["patterns"]  # type: ignore[assignment]
+                return
+            if "leetcodePatterns" in node and looks_like_pattern_list(
+                node["leetcodePatterns"]
+            ):
+                patterns = node["leetcodePatterns"]  # type: ignore[assignment]
+                return
             for value in node.values():
                 walk(value)
 
@@ -137,12 +162,10 @@ def normalize_pattern(entry: Mapping[str, Any], base_url: str) -> Dict[str, Any]
     url = (
         entry.get("url")
         or entry.get("link")
-        or f"{base_url.rstrip('/')}/{slugify(name)}"
-        if name
-        else base_url
+        or f"{base_url.rstrip('/')}/{slugify(name)}" if name else base_url
     )
     notes = entry.get("notes") or entry.get("description") or entry.get("summary") or ""
-    problems = normalize_problems(entry.get("problems", []))
+    problems = normalize_problems(entry.get("problems") or entry.get("questions") or [])
     return {"pattern": name, "url": url, "problems": problems, "notes": notes}
 
 
@@ -150,9 +173,9 @@ def normalize_problems(problems: Iterable[Mapping[str, Any]]) -> List[Dict[str, 
     """Normalize problem entries, keeping title/difficulty/url."""
     normalized: List[Dict[str, str]] = []
     for p in problems:
-        title = p.get("title") or p.get("name") or "Unknown Problem"
-        difficulty = p.get("difficulty") or p.get("level") or "Unknown"
-        url = p.get("url") or p.get("link") or ""
+        title = p.get("title") or p.get("name") or p.get("question") or "Unknown Problem"
+        difficulty = p.get("difficulty") or p.get("level") or p.get("tier") or "Unknown"
+        url = p.get("url") or p.get("link") or p.get("leetcode_url") or ""
         normalized.append({"title": title, "difficulty": difficulty, "url": url})
     return normalized
 
@@ -169,12 +192,29 @@ def slugify(value: str) -> str:
     return value.strip("-")
 
 
+def fetch_fallback_patterns(
+    session: requests.Session, *, fallback_url: str | None = None
+) -> List[Mapping[str, Any]]:
+    """Fetch patterns from a known JSON source as a fallback."""
+    url = fallback_url or os.getenv("FALLBACK_PATTERNS_URL") or FALLBACK_PATTERNS_URL
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+    except Exception:
+        return []
+    return []
+
+
 __all__ = [
     "scrape_patterns",
     "load_base_site",
     "extract_next_data",
     "extract_patterns_from_next_data",
     "extract_patterns_from_html",
+    "fetch_fallback_patterns",
     "normalize_pattern",
     "normalize_problems",
     "slugify",

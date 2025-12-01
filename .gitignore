@@ -8,6 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local secrets
+.env
+credentials.json
+token.json
 .env
 credentials.json
 token.json

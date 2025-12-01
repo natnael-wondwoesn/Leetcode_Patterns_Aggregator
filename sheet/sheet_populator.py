@@ -1,16 +1,8 @@
 """Utility to upload aggregated pattern rows to a Google Sheet.
 
-The main entrypoints are:
-- `build_sheet_rows(records)` -> list[list[str]] for sheets API
-- `push_rows(spreadsheet_id, range_name, records, ...)` to append/update rows.
-
-Expected record shape (e.g. from GeminiSummarizer):
-{
-    "pattern": str,
-    "url": str,
-    "summary": str,
-    "top_problems": str,
-}
+Entrypoints:
+- `push_rows`: legacy single-range writer.
+- `push_pattern_sheets`: create/update one sheet per pattern/topic.
 """
 
 from __future__ import annotations
@@ -27,6 +19,7 @@ from googleapiclient.errors import HttpError
 # Full read/write scope to allow appending/replacing rows.
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 DEFAULT_HEADERS = ["Pattern", "URL", "Summary", "Top Problems"]
+PROBLEM_HEADERS = ["Problem", "Difficulty", "URL", "Solved (Me)", "Solved (Friend)"]
 
 
 def get_credentials(
@@ -72,6 +65,30 @@ def build_sheet_rows(
     return rows
 
 
+def build_pattern_sheet_rows(record: Mapping[str, str], problems: Sequence[Mapping[str, str]]) -> List[List[str]]:
+    """Build rows for a single pattern tab: summary + problem list with solved columns."""
+    rows: List[List[str]] = [
+        ["Pattern", record.get("pattern", "")],
+        ["URL", record.get("url", "")],
+        ["Summary", record.get("summary", "")],
+    ]
+    if record.get("notes"):
+        rows.append(["Notes", record["notes"]])
+    rows.append([])  # spacer
+    rows.append(list(PROBLEM_HEADERS))
+    for p in problems:
+        rows.append(
+            [
+                p.get("title", ""),
+                p.get("difficulty", ""),
+                p.get("url", ""),
+                "",  # Solved (Me)
+                "",  # Solved (Friend)
+            ]
+        )
+    return rows
+
+
 def push_rows(
     spreadsheet_id: str,
     range_name: str,
@@ -101,4 +118,65 @@ def push_rows(
         raise RuntimeError(f"Google Sheets API error: {err}") from err
 
 
-__all__ = ["build_sheet_rows", "push_rows", "get_credentials", "DEFAULT_HEADERS", "SCOPES"]
+def push_pattern_sheets(
+    spreadsheet_id: str,
+    pattern_records: Iterable[Mapping[str, object]],
+    *,
+    token_path: str = "token.json",
+    credentials_path: str = "credentials.json",
+    clear_first: bool = True,
+) -> None:
+    """Create/overwrite one sheet per pattern/topic and populate problems with solved columns."""
+    creds = get_credentials(token_path=token_path, credentials_path=credentials_path)
+    service = build("sheets", "v4", credentials=creds)
+
+    # Fetch existing sheet names once
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    existing_titles = {
+        sheet["properties"]["title"] for sheet in meta.get("sheets", []) if "properties" in sheet
+    }
+
+    for record in pattern_records:
+        title = sanitize_title(record.get("pattern") or "Pattern")
+        problems = record.get("problems") or []
+        rows = build_pattern_sheet_rows(record, problems)
+        range_name = f"'{title}'!A1"
+
+        if title not in existing_titles:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
+            ).execute()
+            existing_titles.add(title)
+
+        if clear_first:
+            service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id, range=range_name
+            ).execute()
+
+        service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=range_name,
+            valueInputOption="RAW",
+            body={"values": rows},
+        ).execute()
+
+
+def sanitize_title(title: str) -> str:
+    """Sheets tab titles cannot contain / \\ ? * [ ] and must be <= 100 chars."""
+    banned = "/\\?*[]"
+    sanitized = "".join(ch for ch in str(title) if ch not in banned).strip()
+    return sanitized[:90] or "Pattern"
+
+
+__all__ = [
+    "build_sheet_rows",
+    "build_pattern_sheet_rows",
+    "push_rows",
+    "push_pattern_sheets",
+    "get_credentials",
+    "sanitize_title",
+    "DEFAULT_HEADERS",
+    "PROBLEM_HEADERS",
+    "SCOPES",
+]

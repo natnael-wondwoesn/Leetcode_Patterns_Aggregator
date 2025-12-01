@@ -30,10 +30,11 @@ class GeminiSummarizer:
     """Wraps the Gemini client and provides helpers to summarize patterns."""
 
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL):
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "Gemini API key missing. Set GOOGLE_API_KEY or pass api_key explicitly."
+                "Gemini API key missing. Set GOOGLE_API_KEY or GEMINI_API_KEY, "
+                "or pass api_key explicitly."
             )
         self.model = model
         self.client = genai.Client(api_key=self.api_key)
@@ -77,6 +78,10 @@ class GeminiSummarizer:
         )
 
         summary_text = response.text.strip() if hasattr(response, "text") else ""
+        if not summary_text:
+            summary_text = (
+                f"{pattern_name}: core idea summary unavailable; review pattern notes."
+            )
         return {
             "pattern": pattern_name,
             "url": url,
