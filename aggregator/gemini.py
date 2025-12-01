@@ -21,22 +21,27 @@ import os
 from typing import Any, Dict, List, Mapping, Sequence
 
 from google import genai
+from google.genai.errors import ClientError
 
-DEFAULT_MODEL = "gemini-1.5-flash"
+# Default to Gemini 2.0 flash; can be overridden via GEMINI_MODEL env or constructor.
+DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_TEMPERATURE = 0.35
 
 
 class GeminiSummarizer:
     """Wraps the Gemini client and provides helpers to summarize patterns."""
 
-    def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL):
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    def __init__(self, api_key: str | None = None, model: str | None = None):
+        self.api_key = (
+            api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        )
         if not self.api_key:
             raise ValueError(
                 "Gemini API key missing. Set GOOGLE_API_KEY or GEMINI_API_KEY, "
                 "or pass api_key explicitly."
             )
-        self.model = model
+        env_model = os.getenv("GEMINI_MODEL")
+        self.model = model or env_model or DEFAULT_MODEL
         self.client = genai.Client(api_key=self.api_key)
 
     def summarize_patterns(
@@ -71,11 +76,7 @@ class GeminiSummarizer:
         url = pattern.get("url") or ""
 
         prompt = build_prompt(pattern_name, problems, notes)
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            generation_config={"temperature": temperature},
-        )
+        response = self._generate_with_fallback(prompt, temperature)
 
         summary_text = response.text.strip() if hasattr(response, "text") else ""
         if not summary_text:
@@ -88,6 +89,34 @@ class GeminiSummarizer:
             "summary": summary_text,
             "top_problems": format_problems(problems),
         }
+
+    def _generate_with_fallback(self, prompt: str, temperature: float):
+        """Try the configured model; if 404, retry with a '-latest' variant."""
+        try:
+            return self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config={"temperature": temperature},
+            )
+        except ClientError as err:
+            status = (
+                getattr(err, "status_code", None)
+                or getattr(err, "code", None)
+                or getattr(err, "http_status", None)
+            )
+            message = str(err)
+            if status == 404 or "NOT_FOUND" in message:
+                alt_model = (
+                    f"{self.model}-latest"
+                    if not str(self.model).endswith("-latest")
+                    else DEFAULT_MODEL
+                )
+                return self.client.models.generate_content(
+                    model=alt_model,
+                    contents=prompt,
+                    config={"temperature": temperature},
+                )
+            raise
 
 
 def build_prompt(
